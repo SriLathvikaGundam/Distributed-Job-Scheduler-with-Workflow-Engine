@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "test": "jest"
+    "test": "jest",
+    "race": "node scripts/claimRace.js"
   },
   "keywords": [],
   "author": "",
