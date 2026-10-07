@@ -1,5 +1,5 @@
 const Job = require('../models/Job');
-const { STATUS } = require('../core/stateMachine');
+const { STATUS, assertTransition } = require('../core/stateMachine');
 
 async function createJob({ type, payload = {}, runAt, maxAttempts }) {
   return Job.create({
@@ -25,7 +25,6 @@ async function listJobs({ status, type, limit = 50, skip = 0 } = {}) {
 }
 
 // Atomically claim the next runnable job for a worker.
-// Returns the claimed job, or null if nothing is ready.
 async function claimNext(workerId, leaseMs) {
   const now = new Date();
   return Job.findOneAndUpdate(
@@ -43,4 +42,50 @@ async function claimNext(workerId, leaseMs) {
   );
 }
 
-module.exports = { createJob, getJob, listJobs, claimNext };
+// Mark a job SUCCESS, but only if this worker still owns it.
+// Returns null if the lease was lost (the result is then dropped).
+async function completeJob(job, result) {
+  assertTransition(STATUS.RUNNING, STATUS.SUCCESS);
+  return Job.findOneAndUpdate(
+    { _id: job._id, status: STATUS.RUNNING, lockedBy: job.lockedBy },
+    {
+      $set: {
+        status: STATUS.SUCCESS,
+        result,
+        finishedAt: new Date(),
+        lockedBy: null,
+        leaseExpiresAt: null,
+      },
+    },
+    { returnDocument: 'after' }
+  );
+}
+
+// A failed attempt: retry if attempts remain, otherwise FAILED.
+// (Step 8 replaces the fixed delay below with exponential backoff.)
+const RETRY_DELAY_MS = 1000;
+
+async function failJob(job, error) {
+  const message = error && error.message ? error.message : String(error);
+  const exhausted = job.attempts >= job.maxAttempts;
+  const next = exhausted ? STATUS.FAILED : STATUS.RETRYING;
+  assertTransition(STATUS.RUNNING, next);
+
+  const update = {
+    status: next,
+    lastError: message,
+    lockedBy: null,
+    leaseExpiresAt: null,
+    ...(exhausted
+      ? { finishedAt: new Date() }
+      : { runAt: new Date(Date.now() + RETRY_DELAY_MS) }),
+  };
+
+  return Job.findOneAndUpdate(
+    { _id: job._id, status: STATUS.RUNNING, lockedBy: job.lockedBy },
+    { $set: update },
+    { returnDocument: 'after' }
+  );
+}
+
+module.exports = { createJob, getJob, listJobs, claimNext, completeJob, failJob };
