@@ -47,4 +47,17 @@ describe('failJob', () => {
     expect(update.$set.finishedAt).toBeInstanceOf(Date);
     expect(update.$set.runAt).toBeUndefined();
   });
+
+    test('retry delay grows with the attempt number', async () => {
+    Job.findOneAndUpdate.mockResolvedValue({});
+
+    await failJob(makeJob({ attempts: 1, maxAttempts: 10 }), new Error('x'));
+    const first = Job.findOneAndUpdate.mock.calls[0][1].$set.runAt.getTime() - Date.now();
+
+    await failJob(makeJob({ attempts: 6, maxAttempts: 10 }), new Error('x'));
+    const sixth = Job.findOneAndUpdate.mock.calls[1][1].$set.runAt.getTime() - Date.now();
+
+    expect(first).toBeLessThanOrEqual(1000);
+    expect(sixth).toBeGreaterThanOrEqual(16000); // attempt 6: exp = 32s, delay is 16 to 32 s
+  });
 });

@@ -1,5 +1,6 @@
 const Job = require('../models/Job');
 const { STATUS, assertTransition } = require('../core/stateMachine');
+const { backoffMs } = require('../core/backoff');
 
 async function createJob({ type, payload = {}, runAt, maxAttempts }) {
   return Job.create({
@@ -63,7 +64,8 @@ async function completeJob(job, result) {
 
 // A failed attempt: retry if attempts remain, otherwise FAILED.
 // (Step 8 replaces the fixed delay below with exponential backoff.)
-const RETRY_DELAY_MS = 1000;
+// (Step 8 replaces the fixed delay below with exponential backoff.)
+ // const RETRY_DELAY_MS = 1000;
 
 async function failJob(job, error) {
   const message = error && error.message ? error.message : String(error);
@@ -78,7 +80,7 @@ async function failJob(job, error) {
     leaseExpiresAt: null,
     ...(exhausted
       ? { finishedAt: new Date() }
-      : { runAt: new Date(Date.now() + RETRY_DELAY_MS) }),
+      : { runAt: new Date(Date.now() + backoffMs(job.attempts)) }),
   };
 
   return Job.findOneAndUpdate(
