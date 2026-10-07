@@ -56,3 +56,15 @@ test('a handler that hangs is failed by the timeout', async () => {
   const err = service.failJob.mock.calls[0][1];
   expect(err.message).toMatch(/timed out/);
 });
+
+test('refuses a job timeout that is not shorter than the lease', () => {
+  expect(() => makeWorker({}, { leaseMs: 1000, jobTimeoutMs: 1000 })).toThrow(/must be less than leaseMs/);
+});
+
+test('maybeReap runs at most once per lease period', async () => {
+  service.reapExhausted.mockResolvedValue(0);
+  const worker = makeWorker({});
+  await worker.maybeReap();
+  await worker.maybeReap();
+  expect(service.reapExhausted).toHaveBeenCalledTimes(1);
+});

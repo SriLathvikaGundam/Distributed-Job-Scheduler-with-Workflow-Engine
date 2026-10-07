@@ -1,4 +1,5 @@
 const os = require('os');
+const config = require('../config');
 const { connect, disconnect } = require('../db');
 const Worker = require('./worker');
 const handlers = require('./handlers');
@@ -17,6 +18,7 @@ const log = {
     workerId: `${os.hostname()}-${process.pid}`,
     handlers,
     log,
+    ...config.worker,
   });
 
   // Simple shutdown for now. Step 10 makes this graceful.

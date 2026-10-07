@@ -4,6 +4,11 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 class Worker {
   constructor({ workerId, handlers, pollMs = 1000, leaseMs = 30000, jobTimeoutMs = 20000, log = console }) {
+    if (jobTimeoutMs >= leaseMs) {
+      throw new Error(
+        'jobTimeoutMs must be less than leaseMs, or healthy jobs would be re-claimed while still running'
+      );
+    }
     this.workerId = workerId;
     this.handlers = handlers;
     this.pollMs = pollMs;
@@ -11,12 +16,22 @@ class Worker {
     this.jobTimeoutMs = jobTimeoutMs;
     this.log = log;
     this.running = false;
+    this.lastReap = 0;
+  }
+
+  // Fail jobs whose worker died on their final attempt (at most once per lease period).
+  async maybeReap() {
+    if (Date.now() - this.lastReap < this.leaseMs) return;
+    this.lastReap = Date.now();
+    const count = await service.reapExhausted();
+    if (count) this.log.warn(`[${this.workerId}] marked ${count} job(s) FAILED: worker lost on final attempt`);
   }
 
   // Claim and run one job. Returns true if a job was handled, false if none was ready.
   async runOnce() {
     const job = await service.claimNext(this.workerId, this.leaseMs);
     if (!job) return false;
+    this.log.info(`[${this.workerId}] claimed ${job.type} ${job._id} (attempt ${job.attempts}/${job.maxAttempts})`);
     await this.execute(job);
     return true;
   }
@@ -63,6 +78,7 @@ class Worker {
     this.log.info(`[${this.workerId}] started`);
     while (this.running) {
       try {
+        await this.maybeReap();
         const handled = await this.runOnce();
         if (!handled) await sleep(this.pollMs); // idle: wait before polling again
       } catch (err) {
