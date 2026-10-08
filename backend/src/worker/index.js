@@ -21,13 +21,21 @@ const log = {
     ...config.worker,
   });
 
-  // Simple shutdown for now. Step 10 makes this graceful.
-  process.on('SIGINT', async () => {
-    console.log('Stopping...');
-    worker.stop();
+  let shuttingDown = false;
+  const shutdown = async (signal) => {
+    if (shuttingDown) {
+      log.warn('Second signal received: forcing exit');
+      process.exit(1);
+    }
+    shuttingDown = true;
+    log.info(`${signal} received: finishing ${worker.active.size} running job(s), claiming no new ones...`);
+    await worker.stop();
     await disconnect();
+    log.info('Shutdown complete');
     process.exit(0);
-  });
+  };
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
 
   await worker.start();
 })();

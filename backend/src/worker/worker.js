@@ -1,9 +1,18 @@
 const service = require('../services/jobService');
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
 class Worker {
-  constructor({ workerId, handlers, pollMs = 1000, leaseMs = 30000, jobTimeoutMs = 20000, log = console }) {
+  constructor({
+    workerId,
+    handlers,
+    concurrency = 3,
+    pollMs = 1000,
+    leaseMs = 30000,
+    jobTimeoutMs = 20000,
+    log = console,
+  }) {
+    if (!Number.isInteger(concurrency) || concurrency < 1) {
+      throw new Error('concurrency must be an integer of at least 1');
+    }
     if (jobTimeoutMs >= leaseMs) {
       throw new Error(
         'jobTimeoutMs must be less than leaseMs, or healthy jobs would be re-claimed while still running'
@@ -11,12 +20,18 @@ class Worker {
     }
     this.workerId = workerId;
     this.handlers = handlers;
+    this.concurrency = concurrency;
     this.pollMs = pollMs;
     this.leaseMs = leaseMs;
     this.jobTimeoutMs = jobTimeoutMs;
     this.log = log;
+
+    this.active = new Set(); // promises of jobs running right now
     this.running = false;
     this.lastReap = 0;
+    this.loopPromise = null;
+    this.idleTimer = null;
+    this.wakeUp = null;
   }
 
   // Fail jobs whose worker died on their final attempt (at most once per lease period).
@@ -27,13 +42,36 @@ class Worker {
     if (count) this.log.warn(`[${this.workerId}] marked ${count} job(s) FAILED: worker lost on final attempt`);
   }
 
-  // Claim and run one job. Returns true if a job was handled, false if none was ready.
-  async runOnce() {
+  // Claim one job (atomically) and log it.
+  async claim() {
     const job = await service.claimNext(this.workerId, this.leaseMs);
+    if (job) {
+      this.log.info(`[${this.workerId}] claimed ${job.type} ${job._id} (attempt ${job.attempts}/${job.maxAttempts})`);
+    }
+    return job;
+  }
+
+  // Claim and run one job, waiting for it to finish. Returns false if nothing was ready.
+  async runOnce() {
+    const job = await this.claim();
     if (!job) return false;
-    this.log.info(`[${this.workerId}] claimed ${job.type} ${job._id} (attempt ${job.attempts}/${job.maxAttempts})`);
     await this.execute(job);
     return true;
+  }
+
+  // Start jobs until every slot is busy or nothing is ready. Returns how many were started.
+  async fillSlots() {
+    let started = 0;
+    while (this.running && this.active.size < this.concurrency) {
+      const job = await this.claim();
+      if (!job) break;
+      started++;
+      const p = this.execute(job)
+        .catch((err) => this.log.error(`[${this.workerId}] job ${job._id} crashed: ${err.message}`))
+        .finally(() => this.active.delete(p));
+      this.active.add(p);
+    }
+    return started;
   }
 
   async execute(job) {
@@ -73,23 +111,47 @@ class Worker {
     }
   }
 
-  async start() {
-    this.running = true;
-    this.log.info(`[${this.workerId}] started`);
+  // A wait that stop() can cut short, so shutdown does not wait for the next poll.
+  idleWait() {
+    return new Promise((resolve) => {
+      this.wakeUp = resolve;
+      this.idleTimer = setTimeout(resolve, this.pollMs);
+    });
+  }
+
+  async loop() {
     while (this.running) {
       try {
         await this.maybeReap();
-        const handled = await this.runOnce();
-        if (!handled) await sleep(this.pollMs); // idle: wait before polling again
+        const started = await this.fillSlots();
+
+        if (this.active.size >= this.concurrency) {
+          await Promise.race(this.active); // all slots busy: wait for one to free up
+        } else if (started === 0 && this.running) {
+          await this.idleWait(); // nothing ready: wait before polling again
+        }
       } catch (err) {
         this.log.error(`[${this.workerId}] loop error: ${err.message}`);
-        await sleep(this.pollMs);
+        if (this.running) await this.idleWait();
       }
     }
   }
 
-  stop() {
+  start() {
+    this.running = true;
+    this.log.info(`[${this.workerId}] started (concurrency ${this.concurrency})`);
+    this.loopPromise = this.loop();
+    return this.loopPromise;
+  }
+
+  // Graceful stop: no new claims, but let running jobs finish.
+  async stop() {
     this.running = false;
+    clearTimeout(this.idleTimer);
+    if (this.wakeUp) this.wakeUp();
+    await this.loopPromise;
+    await Promise.allSettled([...this.active]);
+    this.log.info(`[${this.workerId}] stopped`);
   }
 }
 
