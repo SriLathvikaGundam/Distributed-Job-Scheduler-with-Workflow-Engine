@@ -2,13 +2,32 @@ const Job = require('../models/Job');
 const { STATUS, assertTransition } = require('../core/stateMachine');
 const { backoffMs } = require('../core/backoff');
 
-async function createJob({ type, payload = {}, runAt, maxAttempts }) {
-  return Job.create({
-    type,
-    payload,
-    ...(runAt && { runAt: new Date(runAt) }),
-    ...(maxAttempts && { maxAttempts }),
-  });
+// Returns { job, created }. With an idempotency key, submitting the same key again
+// returns the original job (created: false) instead of making a duplicate.
+async function createJob({ type, payload = {}, runAt, maxAttempts, idempotencyKey }) {
+  if (idempotencyKey) {
+    const existing = await Job.findOne({ idempotencyKey });
+    if (existing) return { job: existing, created: false };
+  }
+
+  try {
+    const job = await Job.create({
+      type,
+      payload,
+      ...(runAt && { runAt: new Date(runAt) }),
+      ...(maxAttempts && { maxAttempts }),
+      // Only set the key when there is one: a stored null would collide in the unique index.
+      ...(idempotencyKey && { idempotencyKey }),
+    });
+    return { job, created: true };
+  } catch (err) {
+    // Two requests with the same key raced: the unique index let only one insert win.
+    if (err.code === 11000 && idempotencyKey) {
+      const existing = await Job.findOne({ idempotencyKey });
+      if (existing) return { job: existing, created: false };
+    }
+    throw err;
+  }
 }
 
 const getJob = (id) => Job.findById(id);
@@ -120,4 +139,38 @@ async function reapExhausted() {
   return res.modifiedCount;
 }
 
-module.exports = { createJob, getJob, listJobs, claimNext, completeJob, failJob, reapExhausted };
+// Cancel a job that has not started. Atomic: if a worker claims it first, this matches nothing.
+async function cancelJob(id) {
+  assertTransition(STATUS.PENDING, STATUS.CANCELLED);
+  assertTransition(STATUS.RETRYING, STATUS.CANCELLED);
+  return Job.findOneAndUpdate(
+    { _id: id, status: { $in: [STATUS.PENDING, STATUS.RETRYING] } },
+    { $set: { status: STATUS.CANCELLED, finishedAt: new Date() } },
+    { returnDocument: 'after' }
+  );
+}
+
+// Send a FAILED job back to the queue with a fresh set of attempts.
+async function retryFailedJob(id) {
+  assertTransition(STATUS.FAILED, STATUS.PENDING);
+  return Job.findOneAndUpdate(
+    { _id: id, status: STATUS.FAILED },
+    {
+      $set: { status: STATUS.PENDING, attempts: 0, runAt: new Date(), lastError: null },
+      $unset: { finishedAt: '', startedAt: '', result: '' },
+    },
+    { returnDocument: 'after' }
+  );
+}
+
+module.exports = {
+  createJob,
+  getJob,
+  listJobs,
+  claimNext,
+  completeJob,
+  failJob,
+  reapExhausted,
+  cancelJob,
+  retryFailedJob,
+};

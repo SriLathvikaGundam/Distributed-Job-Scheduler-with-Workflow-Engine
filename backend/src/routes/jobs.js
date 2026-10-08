@@ -10,7 +10,7 @@ const validId = (req, res, next) =>
     ? next()
     : res.status(400).json({ error: 'Invalid job id' });
 
-// POST /api/jobs - submit a job
+// POST /api/jobs - submit a job (optional header: Idempotency-Key)
 router.post('/', async (req, res, next) => {
   try {
     const { type, payload, runAt, maxAttempts } = req.body || {};
@@ -28,8 +28,22 @@ router.post('/', async (req, res, next) => {
       return res.status(400).json({ error: '"maxAttempts" must be an integer from 1 to 10' });
     }
 
-    const job = await service.createJob({ type: type.trim(), payload, runAt, maxAttempts });
-    res.status(201).json(job);
+    const rawKey = req.get('Idempotency-Key');
+    if (rawKey !== undefined && (rawKey.trim() === '' || rawKey.length > 255)) {
+      return res.status(400).json({ error: 'Idempotency-Key must be 1 to 255 characters' });
+    }
+    const idempotencyKey = rawKey ? rawKey.trim() : undefined;
+
+    const { job, created } = await service.createJob({
+      type: type.trim(),
+      payload,
+      runAt,
+      maxAttempts,
+      idempotencyKey,
+    });
+
+    if (!created) res.set('Idempotency-Replayed', 'true');
+    res.status(created ? 201 : 200).json(job);
   } catch (err) {
     next(err);
   }
@@ -50,6 +64,30 @@ router.get('/', async (req, res, next) => {
     next(err);
   }
 });
+
+// Shared by cancel and retry: run an atomic action, then explain a miss (404 vs 409).
+async function transition(req, res, next, action, conflictMessage) {
+  try {
+    const job = await action(req.params.id);
+    if (job) return res.json(job);
+
+    const existing = await service.getJob(req.params.id);
+    if (!existing) return res.status(404).json({ error: 'Job not found' });
+    res.status(409).json({ error: `${conflictMessage} (current status: ${existing.status})` });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// POST /api/jobs/:id/cancel
+router.post('/:id/cancel', validId, (req, res, next) =>
+  transition(req, res, next, (id) => service.cancelJob(id), 'Only PENDING or RETRYING jobs can be cancelled')
+);
+
+// POST /api/jobs/:id/retry
+router.post('/:id/retry', validId, (req, res, next) =>
+  transition(req, res, next, (id) => service.retryFailedJob(id), 'Only FAILED jobs can be retried')
+);
 
 // GET /api/jobs/:id - one job
 router.get('/:id', validId, async (req, res, next) => {
