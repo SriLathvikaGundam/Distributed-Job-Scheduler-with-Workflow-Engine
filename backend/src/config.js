@@ -14,4 +14,7 @@ module.exports = {
     leaseMs: int(process.env.LEASE_MS, 30000),
     jobTimeoutMs: int(process.env.JOB_TIMEOUT_MS, 20000),
   },
+  scheduler: {
+    tickMs: int(process.env.SCHEDULER_TICK_MS, 1000),
+  },
 };

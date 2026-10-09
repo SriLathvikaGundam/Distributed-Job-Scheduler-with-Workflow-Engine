@@ -10,13 +10,15 @@
     "race": "node scripts/claimRace.js",
     "worker": "node src/worker/index.js",
     "seed": "node scripts/seed.js",
-    "idem": "node scripts/idempotencyRace.js"
+    "idem": "node scripts/idempotencyRace.js",
+    "scheduler": "node src/scheduler/index.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "cron-parser": "^4.9.0",
     "dotenv": "^18.0.5",
     "express": "^5.2.1",
     "mongoose": "^9.11.0"
