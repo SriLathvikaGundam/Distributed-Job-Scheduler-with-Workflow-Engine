@@ -140,3 +140,11 @@ test('stop() cuts an idle wait short instead of waiting for the next poll', asyn
   await worker.stop();
   expect(Date.now() - began).toBeLessThan(1000);
 });
+
+
+test('maybeReap also repairs workflow steps left blocked after a crash', async () => {
+  service.reconcileBlocked.mockResolvedValue(2);
+  const worker = makeWorker({});
+  await worker.maybeReap();
+  expect(service.reconcileBlocked).toHaveBeenCalledTimes(1);
+});

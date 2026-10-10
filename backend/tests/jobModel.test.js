@@ -38,3 +38,16 @@ describe('Job model', () => {
     expect(err.errors.maxAttempts).toBeDefined();
   });
 });
+
+
+describe('Job model: workflow fields', () => {
+  test('standalone jobs have no workflow and no dependencies', () => {
+    const job = new Job({ type: 'echo' });
+    expect(job.workflowId).toBeNull();
+    expect(job.dependsOn).toEqual([]);
+  });
+
+  test('accepts the BLOCKED status', async () => {
+    await expect(new Job({ type: 'echo', status: STATUS.BLOCKED }).validate()).resolves.toBeUndefined();
+  });
+});

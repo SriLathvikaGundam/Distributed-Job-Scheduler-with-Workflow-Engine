@@ -36,4 +36,19 @@ describe('job state machine', () => {
     expect(isTerminal(STATUS.CANCELLED)).toBe(true);
     expect(isTerminal(STATUS.RUNNING)).toBe(false);
   });
+
+});
+
+describe('BLOCKED (workflow steps)', () => {
+  test('a blocked step is released to PENDING or cancelled, nothing else', () => {
+    expect(canTransition(STATUS.BLOCKED, STATUS.PENDING)).toBe(true);
+    expect(canTransition(STATUS.BLOCKED, STATUS.CANCELLED)).toBe(true);
+    expect(canTransition(STATUS.BLOCKED, STATUS.RUNNING)).toBe(false);
+    expect(canTransition(STATUS.BLOCKED, STATUS.SUCCESS)).toBe(false);
+  });
+
+  test('nothing can move INTO blocked after creation', () => {
+    expect(canTransition(STATUS.PENDING, STATUS.BLOCKED)).toBe(false);
+    expect(canTransition(STATUS.RUNNING, STATUS.BLOCKED)).toBe(false);
+  });
 });

@@ -34,14 +34,19 @@ class Worker {
     this.wakeUp = null;
   }
 
-  // Fail jobs whose worker died on their final attempt (at most once per lease period).
+    // Housekeeping, at most once per lease period:
+  //  - fail jobs whose worker died on their final attempt
+  //  - repair workflow steps that were left BLOCKED after a crash
   async maybeReap() {
     if (Date.now() - this.lastReap < this.leaseMs) return;
     this.lastReap = Date.now();
+
     const count = await service.reapExhausted();
     if (count) this.log.warn(`[${this.workerId}] marked ${count} job(s) FAILED: worker lost on final attempt`);
-  }
 
+    const repaired = await service.reconcileBlocked();
+    if (repaired) this.log.warn(`[${this.workerId}] repaired ${repaired} stalled workflow step(s)`);
+  }
   // Claim one job (atomically) and log it.
   async claim() {
     const job = await service.claimNext(this.workerId, this.leaseMs);

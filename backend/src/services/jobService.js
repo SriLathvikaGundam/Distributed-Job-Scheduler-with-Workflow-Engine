@@ -1,6 +1,7 @@
 const Job = require('../models/Job');
 const { STATUS, assertTransition } = require('../core/stateMachine');
 const { backoffMs } = require('../core/backoff');
+const { advanceDependents, reconcileBlocked } = require('./dependencyService');
 
 // Returns { job, created }. With an idempotency key, submitting the same key again
 // returns the original job (created: false) instead of making a duplicate.
@@ -48,6 +49,7 @@ async function listJobs({ status, type, limit = 50, skip = 0 } = {}) {
 // A job is runnable if either:
 //   1. it is PENDING/RETRYING and its runAt time has arrived, or
 //   2. it is RUNNING but its lease expired (the worker died) and attempts remain.
+// BLOCKED jobs match neither branch, so workers never touch them.
 async function claimNext(workerId, leaseMs) {
   const now = new Date();
   return Job.findOneAndUpdate(
@@ -74,10 +76,20 @@ async function claimNext(workerId, leaseMs) {
   );
 }
 
+// Tell the workflow steps waiting on this job that it reached a final state.
+// If this fails, the job itself is already recorded; reconcileBlocked() repairs it later.
+async function notifyDependents(jobId) {
+  try {
+    await advanceDependents(jobId);
+  } catch (err) {
+    console.error(`advanceDependents failed for job ${jobId} (reconciler will repair): ${err.message}`);
+  }
+}
+
 // Mark a job SUCCESS, but only if this worker still owns it.
 async function completeJob(job, result) {
   assertTransition(STATUS.RUNNING, STATUS.SUCCESS);
-  return Job.findOneAndUpdate(
+  const done = await Job.findOneAndUpdate(
     { _id: job._id, status: STATUS.RUNNING, lockedBy: job.lockedBy },
     {
       $set: {
@@ -90,6 +102,8 @@ async function completeJob(job, result) {
     },
     { returnDocument: 'after' }
   );
+  if (done && job.workflowId) await notifyDependents(job._id);
+  return done;
 }
 
 // A failed attempt: retry with backoff if attempts remain, otherwise FAILED.
@@ -109,11 +123,14 @@ async function failJob(job, error) {
       : { runAt: new Date(Date.now() + backoffMs(job.attempts)) }),
   };
 
-  return Job.findOneAndUpdate(
+  const updated = await Job.findOneAndUpdate(
     { _id: job._id, status: STATUS.RUNNING, lockedBy: job.lockedBy },
     { $set: update },
     { returnDocument: 'after' }
   );
+  // Only a FINAL failure affects the steps downstream. A retry is not a failure yet.
+  if (updated && exhausted && job.workflowId) await notifyDependents(job._id);
+  return updated;
 }
 
 // A job whose worker died on its LAST attempt can never be re-claimed.
@@ -173,4 +190,5 @@ module.exports = {
   reapExhausted,
   cancelJob,
   retryFailedJob,
+  reconcileBlocked,
 };
