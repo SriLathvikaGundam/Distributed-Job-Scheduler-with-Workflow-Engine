@@ -148,3 +148,101 @@ test('maybeReap also repairs workflow steps left blocked after a crash', async (
   await worker.maybeReap();
   expect(service.reconcileBlocked).toHaveBeenCalledTimes(1);
 });
+
+
+// ---- Step 14: pluggable job sources (MongoDB or SQS) ----
+
+function fakeSource(batches, { blocking = false } = {}) {
+  return { blocking, next: jest.fn(async () => batches.shift() || []) };
+}
+
+test('runs jobs from an injected source and acknowledges AFTER the outcome is recorded', async () => {
+  const ack = jest.fn();
+  const source = fakeSource([[{ job, ack }]]);
+  const worker = makeWorker({ echo: jest.fn().mockResolvedValue({ ok: 1 }) }, { source, pollMs: 5 });
+
+  worker.start();
+  await waitFor(() => ack.mock.calls.length === 1);
+  await worker.stop();
+
+  expect(service.completeJob).toHaveBeenCalledWith(job, { ok: 1 });
+  expect(service.completeJob.mock.invocationCallOrder[0]).toBeLessThan(ack.mock.invocationCallOrder[0]);
+});
+
+test('does NOT acknowledge when the outcome could not be recorded (the message must come back)', async () => {
+  const ack = jest.fn();
+  service.completeJob.mockRejectedValue(new Error('db down'));
+  const source = fakeSource([[{ job, ack }]]);
+  const worker = makeWorker({ echo: jest.fn().mockResolvedValue({}) }, { source, pollMs: 5 });
+
+  worker.start();
+  await waitFor(() => service.completeJob.mock.calls.length === 1);
+  await worker.stop();
+
+  expect(ack).not.toHaveBeenCalled();
+});
+
+test('a failing ack is logged and does not crash the worker', async () => {
+  const warnings = [];
+  const ack = jest.fn().mockRejectedValue(new Error('network'));
+  const source = fakeSource([[{ job, ack }]]);
+  const worker = makeWorker(
+    { echo: jest.fn().mockResolvedValue({}) },
+    { source, pollMs: 5, log: { info() {}, warn: (m) => warnings.push(m), error() {} } }
+  );
+
+  worker.start();
+  await waitFor(() => ack.mock.calls.length === 1);
+  await worker.stop();
+  expect(warnings.some((m) => /could not acknowledge/.test(m))).toBe(true);
+});
+
+test('asks the source for no more jobs than there are free slots', async () => {
+  const source = fakeSource([]);
+  const worker = makeWorker({}, { source, concurrency: 3, pollMs: 5 });
+
+  worker.start();
+  await waitFor(() => source.next.mock.calls.length >= 1);
+  await worker.stop();
+  expect(source.next.mock.calls[0][0]).toBe(3);
+});
+
+test('a blocking source that already waited is polled again straight away', async () => {
+  const source = {
+    blocking: true,
+    next: jest.fn(() => new Promise((resolve) => setTimeout(() => resolve([]), 40))), // behaves like a real long poll
+  };
+  const worker = makeWorker({}, { source, pollMs: 20 });
+  const pause = jest.spyOn(worker, 'idleWait');
+
+  worker.start();
+  await waitFor(() => source.next.mock.calls.length >= 3);
+  await worker.stop();
+  expect(pause).not.toHaveBeenCalled();
+});
+
+test('a blocking source that comes back empty instantly is NOT hammered', async () => {
+  const source = fakeSource([], { blocking: true }); // returns [] immediately, like WaitTimeSeconds=0
+  const worker = makeWorker({}, { source, pollMs: 50 });
+  const pause = jest.spyOn(worker, 'idleWait');
+
+  worker.start();
+  await waitFor(() => pause.mock.calls.length >= 1);
+  await new Promise((r) => setTimeout(r, 120));
+  await worker.stop();
+  expect(source.next.mock.calls.length).toBeLessThan(6); // a tight loop would make thousands of calls
+});
+
+test('stop() aborts a long poll that is in progress', async () => {
+  const source = {
+    blocking: true,
+    next: jest.fn((max, { signal }) => new Promise((resolve) => signal.addEventListener('abort', () => resolve([])))),
+  };
+  const worker = makeWorker({}, { source, pollMs: 10000 });
+
+  worker.start();
+  await waitFor(() => source.next.mock.calls.length === 1);
+  const began = Date.now();
+  await worker.stop();
+  expect(Date.now() - began).toBeLessThan(1000);
+});

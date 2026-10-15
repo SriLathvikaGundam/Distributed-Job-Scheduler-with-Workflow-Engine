@@ -11,13 +11,17 @@
     "worker": "node src/worker/index.js",
     "seed": "node scripts/seed.js",
     "idem": "node scripts/idempotencyRace.js",
-    "scheduler": "node src/scheduler/index.js"
+    "scheduler": "node src/scheduler/index.js",
+    "dispatcher": "node src/dispatcher/index.js",
+    "sqs:create": "node scripts/createQueues.js",
+    "sqs:check": "node scripts/sqsCheck.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@aws-sdk/client-sqs": "^3.1150.0",
     "cron-parser": "^4.9.0",
     "dotenv": "^18.0.5",
     "express": "^5.2.1",

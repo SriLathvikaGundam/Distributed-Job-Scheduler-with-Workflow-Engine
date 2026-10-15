@@ -2,6 +2,7 @@ const Job = require('../models/Job');
 const { STATUS, assertTransition } = require('../core/stateMachine');
 const { backoffMs } = require('../core/backoff');
 const { advanceDependents, reconcileBlocked } = require('./dependencyService');
+const { whyNotClaimed } = require('../core/claimReason');
 
 // Returns { job, created }. With an idempotency key, submitting the same key again
 // returns the original job (created: false) instead of making a duplicate.
@@ -45,39 +46,59 @@ async function listJobs({ status, type, limit = 50, skip = 0 } = {}) {
   return { items, total };
 }
 
-// Atomically claim the next runnable job for a worker.
-// A job is runnable if either:
-//   1. it is PENDING/RETRYING and its runAt time has arrived, or
-//   2. it is RUNNING but its lease expired (the worker died) and attempts remain.
+// Which jobs may a worker run right now?
+//   1. PENDING/RETRYING and its runAt time has arrived, or
+//   2. RUNNING but its lease expired (the worker died) and attempts remain.
 // BLOCKED jobs match neither branch, so workers never touch them.
-async function claimNext(workerId, leaseMs) {
-  const now = new Date();
-  return Job.findOneAndUpdate(
-    {
-      $or: [
-        { status: { $in: [STATUS.PENDING, STATUS.RETRYING] }, runAt: { $lte: now } },
-        {
-          status: STATUS.RUNNING,
-          leaseExpiresAt: { $lt: now },
-          $expr: { $lt: ['$attempts', '$maxAttempts'] },
-        },
-      ],
-    },
-    {
-      $set: {
+function runnableFilter(now) {
+  return {
+    $or: [
+      { status: { $in: [STATUS.PENDING, STATUS.RETRYING] }, runAt: { $lte: now } },
+      {
         status: STATUS.RUNNING,
-        lockedBy: workerId,
-        startedAt: now,
-        leaseExpiresAt: new Date(now.getTime() + leaseMs),
+        leaseExpiresAt: { $lt: now },
+        $expr: { $lt: ['$attempts', '$maxAttempts'] },
       },
-      $inc: { attempts: 1 },
-    },
-    { sort: { runAt: 1 }, returnDocument: 'after' }
-  );
+    ],
+  };
 }
 
-// Tell the workflow steps waiting on this job that it reached a final state.
-// If this fails, the job itself is already recorded; reconcileBlocked() repairs it later.
+// What claiming does: take ownership for a lease period and count the attempt.
+function claimUpdate(workerId, leaseMs, now) {
+  return {
+    $set: {
+      status: STATUS.RUNNING,
+      lockedBy: workerId,
+      startedAt: now,
+      leaseExpiresAt: new Date(now.getTime() + leaseMs),
+      queuedAt: null, // no longer waiting in the queue
+    },
+    $inc: { attempts: 1 },
+  };
+}
+
+// Atomically claim the next runnable job for a worker (used in "mongo" queue mode).
+async function claimNext(workerId, leaseMs) {
+  const now = new Date();
+  return Job.findOneAndUpdate(runnableFilter(now), claimUpdate(workerId, leaseMs, now), {
+    sort: { runAt: 1 },
+    returnDocument: 'after',
+  });
+}
+
+// Atomically claim ONE specific job (used in "sqs" mode, where a message names the job).
+// Returns { job } on success, or { job: null, reason } explaining why it could not be claimed.
+async function claimById(id, workerId, leaseMs) {
+  const now = new Date();
+  const job = await Job.findOneAndUpdate({ _id: id, ...runnableFilter(now) }, claimUpdate(workerId, leaseMs, now), {
+    returnDocument: 'after',
+  });
+  if (job) return { job, reason: null };
+
+  // Only used to explain the miss, never to decide whether to act.
+  const existing = await Job.findById(id, 'status runAt leaseExpiresAt attempts maxAttempts');
+  return { job: null, reason: whyNotClaimed(existing, now) };
+}
 async function notifyDependents(jobId) {
   try {
     await advanceDependents(jobId);
@@ -185,6 +206,7 @@ module.exports = {
   getJob,
   listJobs,
   claimNext,
+  claimById,
   completeJob,
   failJob,
   reapExhausted,

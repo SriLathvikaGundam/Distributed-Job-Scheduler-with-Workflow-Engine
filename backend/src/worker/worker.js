@@ -1,4 +1,5 @@
 const service = require('../services/jobService');
+const { MongoSource } = require('./sources');
 
 class Worker {
   constructor({
@@ -8,6 +9,7 @@ class Worker {
     pollMs = 1000,
     leaseMs = 30000,
     jobTimeoutMs = 20000,
+    source,
     log = console,
   }) {
     if (!Number.isInteger(concurrency) || concurrency < 1) {
@@ -25,16 +27,19 @@ class Worker {
     this.leaseMs = leaseMs;
     this.jobTimeoutMs = jobTimeoutMs;
     this.log = log;
+    // Where jobs come from: MongoDB by default, or any object with the same shape (see sources.js).
+    this.source = source || new MongoSource({ service, workerId, leaseMs });
 
-    this.active = new Set(); // promises of jobs running right now
+    this.active = new Set();
     this.running = false;
     this.lastReap = 0;
     this.loopPromise = null;
     this.idleTimer = null;
     this.wakeUp = null;
+    this.abort = null;
   }
 
-    // Housekeeping, at most once per lease period:
+  // Housekeeping, at most once per lease period:
   //  - fail jobs whose worker died on their final attempt
   //  - repair workflow steps that were left BLOCKED after a crash
   async maybeReap() {
@@ -47,36 +52,46 @@ class Worker {
     const repaired = await service.reconcileBlocked();
     if (repaired) this.log.warn(`[${this.workerId}] repaired ${repaired} stalled workflow step(s)`);
   }
-  // Claim one job (atomically) and log it.
-  async claim() {
-    const job = await service.claimNext(this.workerId, this.leaseMs);
-    if (job) {
-      this.log.info(`[${this.workerId}] claimed ${job.type} ${job._id} (attempt ${job.attempts}/${job.maxAttempts})`);
-    }
-    return job;
-  }
 
-  // Claim and run one job, waiting for it to finish. Returns false if nothing was ready.
+  // Get one job from the source and run it to completion. Returns false if none was ready.
   async runOnce() {
-    const job = await this.claim();
-    if (!job) return false;
-    await this.execute(job);
+    const [item] = await this.source.next(1);
+    if (!item) return false;
+    await this.run(item);
     return true;
   }
 
-  // Start jobs until every slot is busy or nothing is ready. Returns how many were started.
+  // Run a job, then acknowledge it (for SQS: delete the message) once its outcome is recorded.
+  async run({ job, ack }) {
+    this.log.info(`[${this.workerId}] claimed ${job.type} ${job._id} (attempt ${job.attempts}/${job.maxAttempts})`);
+    await this.execute(job); // throws only if the outcome could not be recorded: then we do NOT ack
+    try {
+      await ack();
+    } catch (err) {
+      this.log.warn(`[${this.workerId}] could not acknowledge job ${job._id}: ${err.message}`);
+    }
+  }
+
+  // Fill the free slots from the source. Returns how many jobs were started.
   async fillSlots() {
-    let started = 0;
-    while (this.running && this.active.size < this.concurrency) {
-      const job = await this.claim();
-      if (!job) break;
-      started++;
-      const p = this.execute(job)
-        .catch((err) => this.log.error(`[${this.workerId}] job ${job._id} crashed: ${err.message}`))
+    const free = this.concurrency - this.active.size;
+    if (!this.running || free <= 0) return 0;
+
+    this.abort = new AbortController();
+    let items;
+    try {
+      items = await this.source.next(free, { signal: this.abort.signal });
+    } finally {
+      this.abort = null;
+    }
+
+    for (const item of items) {
+      const p = this.run(item)
+        .catch((err) => this.log.error(`[${this.workerId}] job ${item.job._id} crashed: ${err.message}`))
         .finally(() => this.active.delete(p));
       this.active.add(p);
     }
-    return started;
+    return items.length;
   }
 
   async execute(job) {
@@ -116,7 +131,6 @@ class Worker {
     }
   }
 
-  // A wait that stop() can cut short, so shutdown does not wait for the next poll.
   idleWait() {
     return new Promise((resolve) => {
       this.wakeUp = resolve;
@@ -128,12 +142,17 @@ class Worker {
     while (this.running) {
       try {
         await this.maybeReap();
+        const polledAt = Date.now();
         const started = await this.fillSlots();
 
         if (this.active.size >= this.concurrency) {
           await Promise.race(this.active); // all slots busy: wait for one to free up
         } else if (started === 0 && this.running) {
-          await this.idleWait(); // nothing ready: wait before polling again
+          // Nothing ready. A real long poll has already waited, so poll again at once.
+          // But if the source came back empty instantly (e.g. long polling switched off),
+          // pause, or we would hammer the queue in a tight loop.
+          const alreadyWaited = this.source.blocking && Date.now() - polledAt >= this.pollMs;
+          if (!alreadyWaited) await this.idleWait();
         }
       } catch (err) {
         this.log.error(`[${this.workerId}] loop error: ${err.message}`);
@@ -149,11 +168,12 @@ class Worker {
     return this.loopPromise;
   }
 
-  // Graceful stop: no new claims, but let running jobs finish.
+  // Graceful stop: no new work, cut short any wait, let running jobs finish.
   async stop() {
     this.running = false;
     clearTimeout(this.idleTimer);
     if (this.wakeUp) this.wakeUp();
+    if (this.abort) this.abort.abort(); // ends a long poll in progress
     await this.loopPromise;
     await Promise.allSettled([...this.active]);
     this.log.info(`[${this.workerId}] stopped`);

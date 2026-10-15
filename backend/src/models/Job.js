@@ -19,6 +19,11 @@ const jobSchema = new mongoose.Schema(
     result: mongoose.Schema.Types.Mixed,
     lastError: String,
 
+    // Set when a dispatcher puts this job's message on the SQS queue (queue mode "sqs").
+    queuedAt: { type: Date, default: null },
+
+    // Same key submitted twice means the same job (safe client retries).
+
     // Same key submitted twice means the same job (safe client retries).
     idempotencyKey: { type: String, unique: true, sparse: true },
 

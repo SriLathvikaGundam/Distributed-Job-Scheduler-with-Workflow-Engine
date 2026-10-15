@@ -1,4 +1,5 @@
 require('dotenv').config();
+const { parseQueueConfig } = require('./core/queueConfig');
 
 const int = (value, fallback) => {
   const n = parseInt(value, 10);
@@ -16,5 +17,12 @@ module.exports = {
   },
   scheduler: {
     tickMs: int(process.env.SCHEDULER_TICK_MS, 1000),
+  },
+  // "mongo": workers claim jobs straight from MongoDB (default).  "sqs": jobs are delivered via AWS SQS.
+  queue: parseQueueConfig(process.env),
+  dispatcher: {
+    tickMs: int(process.env.DISPATCH_TICK_MS, 1000),
+    // A job that was queued but is still waiting after this long gets queued again (the message may be lost).
+    redispatchAfterMs: int(process.env.REDISPATCH_AFTER_MS, 300000),
   },
 };
