@@ -2,12 +2,7 @@ const config = require('../config');
 const { connect, disconnect } = require('../db');
 const Scheduler = require('./scheduler');
 
-const stamp = () => new Date().toISOString().slice(11, 19); // HH:MM:SS (UTC)
-const log = {
-  info: (m) => console.log(`${stamp()} ${m}`),
-  warn: (m) => console.warn(`${stamp()} ${m}`),
-  error: (m) => console.error(`${stamp()} ${m}`),
-};
+const log = require('../logger');
 
 (async () => {
   await connect();

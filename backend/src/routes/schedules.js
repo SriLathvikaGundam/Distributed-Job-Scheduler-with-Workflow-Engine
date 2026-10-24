@@ -1,14 +1,11 @@
 const express = require('express');
-const mongoose = require('mongoose');
+const validId = require('./validId')('job');
 const service = require('../services/scheduleService');
 const { validateCron } = require('../core/cron');
 
 const router = express.Router();
 
-const validId = (req, res, next) =>
-  mongoose.isValidObjectId(req.params.id)
-    ? next()
-    : res.status(400).json({ error: 'Invalid schedule id' });
+
 
 // POST /api/schedules - create a recurring job
 router.post('/', async (req, res, next) => {

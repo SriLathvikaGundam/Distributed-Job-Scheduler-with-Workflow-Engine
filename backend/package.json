@@ -14,7 +14,8 @@
     "scheduler": "node src/scheduler/index.js",
     "dispatcher": "node src/dispatcher/index.js",
     "sqs:create": "node scripts/createQueues.js",
-    "sqs:check": "node scripts/sqsCheck.js"
+    "sqs:check": "node scripts/sqsCheck.js",
+    "test:integration": "jest --config jest.integration.config.js"
   },
   "keywords": [],
   "author": "",
@@ -30,5 +31,8 @@
   "devDependencies": {
     "jest": "^30.5.2",
     "supertest": "^7.3.1"
-  }
+  },
+  "jest": {
+  "testPathIgnorePatterns": ["/node_modules/", "/tests/integration/"]
+}
 }

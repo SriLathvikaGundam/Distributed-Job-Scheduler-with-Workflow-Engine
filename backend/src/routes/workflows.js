@@ -1,14 +1,11 @@
 const express = require('express');
-const mongoose = require('mongoose');
+const validId = require('./validId')('job');
 const service = require('../services/workflowService');
 const { validateSteps } = require('../core/dag');
 
 const router = express.Router();
 
-const validId = (req, res, next) =>
-  mongoose.isValidObjectId(req.params.id)
-    ? next()
-    : res.status(400).json({ error: 'Invalid workflow id' });
+
 
 // POST /api/workflows - create a workflow of dependent steps
 router.post('/', async (req, res, next) => {
