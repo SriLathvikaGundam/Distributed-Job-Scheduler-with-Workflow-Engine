@@ -145,3 +145,24 @@ describe('POST /api/jobs/:id/retry', () => {
     expect(res.body.error).toMatch(/SUCCESS/);
   });
 });
+
+
+describe('GET /api/jobs/stats', () => {
+  test('returns the counts instead of treating "stats" as a job id', async () => {
+    service.jobStats.mockResolvedValue({ counts: { PENDING: 1 }, total: 1 });
+
+    const res = await request(app).get('/api/jobs/stats');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ counts: { PENDING: 1 }, total: 1 });
+  });
+
+  test('a real job id still reaches the job lookup', async () => {
+    service.getJob.mockResolvedValue({ _id: '64b7f0c2a1b2c3d4e5f60718' });
+    const res = await request(app).get('/api/jobs/64b7f0c2a1b2c3d4e5f60718');
+    expect(res.status).toBe(200);
+  });
+
+  test('a malformed id is still rejected', async () => {
+    expect((await request(app).get('/api/jobs/hello')).status).toBe(400);
+  });
+});

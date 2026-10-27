@@ -75,6 +75,15 @@ async function transition(req, res, next, action, conflictMessage) {
     next(err);
   }
 }
+// GET /api/jobs/stats - how many jobs are in each status.
+// This MUST be declared before '/:id', or "stats" would be treated as a job id.
+router.get('/stats', async (req, res, next) => {
+  try {
+    res.json(await service.jobStats());
+  } catch (err) {
+    next(err);
+  }
+});
 
 // POST /api/jobs/:id/cancel
 router.post('/:id/cancel', validId, (req, res, next) =>

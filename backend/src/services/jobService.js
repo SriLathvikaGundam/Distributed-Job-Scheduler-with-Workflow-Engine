@@ -200,6 +200,16 @@ async function retryFailedJob(id) {
     { returnDocument: 'after' }
   );
 }
+// How many jobs are in each status, for the dashboard. Every status is present, even at zero.
+async function jobStats() {
+  const rows = await Job.aggregate([{ $group: { _id: '$status', count: { $sum: 1 } } }]);
+
+  const counts = Object.fromEntries(Object.values(STATUS).map((status) => [status, 0]));
+  for (const { _id, count } of rows) {
+    if (_id in counts) counts[_id] = count;
+  }
+  return { counts, total: Object.values(counts).reduce((sum, n) => sum + n, 0) };
+}
 
 module.exports = {
   createJob,
@@ -213,4 +223,5 @@ module.exports = {
   cancelJob,
   retryFailedJob,
   reconcileBlocked,
+  jobStats,
 };
